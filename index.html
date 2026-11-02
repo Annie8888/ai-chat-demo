@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>AI 对话测试</title>
+
+    <!-- 使用 fastly 镜像 -->
+    <script src="https://fastly.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://fastly.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+
+    <style>
+        /* ⭐️ 新增：全局排版 */
+        body { margin: 0; font-family: sans-serif; display: flex; height: 100vh; }
+        
+        /* ⭐️ 新增：左侧边栏样式 */
+        .sidebar { width: 250px; background: #202123; color: white; display: flex; flex-direction: column; padding: 10px; }
+        .new-chat-btn { padding: 10px; background: #19c37d; color: white; border: none; border-radius: 5px; cursor: pointer; margin-bottom: 20px; font-weight: bold; }
+        .new-chat-btn:hover { background: #1a885d; }
+        .session-list { flex: 1; overflow-y: auto; list-style: none; padding: 0; margin: 0; }
+        .session-item { padding: 10px; margin-bottom: 5px; border-radius: 5px; cursor: pointer; word-break: break-all; font-size: 14px; background: #2a2b32; }
+        .session-item:hover { background: #343541; }
+        .session-item.active { background: #343541; border-left: 3px solid #19c37d; }
+
+        /* ⭐️ 修改：右侧主区域样式 */
+        .main-content { flex: 1; display: flex; flex-direction: column; background: #fff; }
+        .chat-box { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; }
+        
+        /* 气泡样式调整 */
+        .message { max-width: 80%; padding: 10px 15px; border-radius: 8px; line-height: 1.5; }
+        .message.user { align-self: flex-end; background: #1ce78d; }
+        .message.assistant { align-self: flex-start; background: #fafafa; width: 80%; max-width: 80%; }
+
+        /* 底部输入区域（居中对齐，宽度更宽） */
+        .input-area { 
+            padding: 20px 0 30px 0; 
+            background: transparent; /* 去除背景色，让聊天区和输入区融合 */
+            display: flex;
+            justify-content: center;
+            width: 100%;
+        }
+
+        /* 输入框外壳，宽大圆角矩形 */
+        .input-wrapper {
+            display: flex;
+            align-items: flex-end;
+            background: #ffffff;
+            border-radius: 24px;
+            padding: 8px 12px 8px 16px;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05); /* 增加一点悬浮阴影 */
+            transition: border-color 0.2s, box-shadow 0.2s;
+            width: 80%; /* ⭐️ 核心：占满宽度的 80% */
+            max-width: 800px; /* 限制最大宽度，防止大屏上长得像面条 */
+        }
+        
+        .input-wrapper:focus-within {
+            border-color: #19c37d;
+            box-shadow: 0 4px 15px rgba(25, 195, 125, 0.15); /* 聚焦时泛绿光 */
+        }
+
+        /* 文本域自适应 */
+        #user-input {
+            flex: 1;
+            border: none;
+            background: transparent;
+            outline: none;
+            font-size: 15px;
+            line-height: 1.5;
+            resize: none;
+            max-height: 200px; /* 撑到 200px 出现滚动条 */
+            padding: 6px 0;
+            font-family: inherit;
+            color: #333;
+        }
+        #user-input::placeholder { color: #9ca3af; }
+
+        /* 发送按钮（圆形向上箭头） */
+        #send-btn {
+            background: #19c37d;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 34px;
+            height: 34px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            margin-left: 10px;
+            font-size: 18px;
+            transition: all 0.2s;
+            flex-shrink: 0; /* 防止被挤压 */
+        }
+        #send-btn:hover { background: #1a885d; transform: scale(1.05); }
+        #send-btn:disabled { background: #f3f4f6; color: #9ca3af; cursor: not-allowed; transform: none; }
+
+        /* 停止按钮（圆形方块） */
+        #stop-btn {
+            background: #ef4444;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 34px;
+            height: 34px;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            margin-left: 10px;
+            flex-shrink: 0;
+        }
+        #stop-btn:hover { background: #dc2626; }
+    </style>
+</head>
+<body>
+    <!-- 左侧对话栏 -->
+    <div class="sidebar">
+        <button class="new-chat-btn" id="new-chat-btn">+ 新建对话</button>
+        <ul class="session-list" id="session-list">
+           
+        </ul>
+    </div>
+     
+    <!-- 右侧聊天界面 -->
+    <div class="main-content">
+        <div class="chat-box" id="chat-box"></div>
+        
+            <div class="input-area">
+                 <div class="input-wrapper">
+                     <textarea id="user-input" placeholder="给 AI 发送消息..." rows="1"></textarea>
+                     <button id="send-btn" title="发送">↑</button>
+                     <button id="stop-btn" title="停止">■</button>
+                 </div>
+            </div>
+    </div>
+
+    <script>
+        const API_URL = '/api/chat';
+        const MODEL = 'GLM-4.5-Flash';
+        const STORAGE_KEY = 'ai_chat_sessions_v2';
+
+        const chatBox = document.getElementById('chat-box');
+        const inputEl = document.getElementById('user-input');
+        const btn = document.getElementById('send-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const sessionListEl = document.getElementById('session-list');
+        const newChatBtn = document.getElementById('new-chat-btn');
+
+        let fullText = ''; // 用来存放最终拼好的完整回答 
+        let currentController = null;
+        let currentAiDiv = null; // 当前正在流式渲染的 AI 气泡节点
+
+        let sessions = []; // 存储所有会话，格式：[{ id, title, messages: [] }]
+        let currentSessionId = null; // 当前正在查看的会话 ID
+
+        async function askAI() {
+            
+            await compressHistoryIfNeeded(); // ⭐️ 每次发请求前检查一次
+
+            const question = inputEl.value;
+            if (!question) return;
+
+            // 获取当前会话
+            const session = getCurrentSession();
+            if (!session) return;
+
+
+            appendMessageToDOM('user', question);
+            session.messages.push({ role: 'user', content: question });
+
+              // ⭐️ 核心体验：如果是第一句话，就把前 15 个字作为侧边栏标题
+            if (session.messages.length === 1) {
+                session.title = question.slice(0, 15) + (question.length > 15 ? '...' : '');
+            }
+            saveData();
+            // ⭐️ 加上这一句，每次数据变化时，顺便刷新左侧侧边栏
+            renderSidebar();
+
+            inputEl.value = '';
+            inputEl.style.height = 'auto'; // ⭐️ 清空后恢复默认高度
+            fullText = ''
+            stopBtn.style.display = 'inline-block';
+            btn.disabled = true;
+
+            currentAiDiv = appendMessageToDOM('assistant', '思考中...');
+            currentAiDiv.innerText = '';
+
+            currentController = new AbortController();
+         
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        model: MODEL,
+                        messages: session.messages,
+                        stream: true,
+                    }),
+                    signal: currentController.signal
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let renderTimer = null
+                
+                // 清空提示词，准备接收流
+                currentAiDiv.innerText = ""; // 清空"思考中"
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); 
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                            const dataStr = line.slice(6);
+                            try {
+                                const parsed = JSON.parse(dataStr);
+                                const content = parsed.choices?.[0]?.delta?.content;
+                                if (content) {
+                                    // 在这里更新页面上的文字
+                                    fullText += content;
+                                    if(renderTimer){
+                                        clearTimeout(renderTimer)
+                                    }
+                                    renderTimer = setTimeout(()=>{
+                                        // 1. 补齐半截语法
+                                        const safeText = formatStreamingMarkdown(fullText);
+                                        
+                                        // 2. 解析为 HTML
+                                        const rawHtml = marked.parse(safeText);
+                                        
+                                        // 3. 过滤 XSS 并更新到页面
+                                        currentAiDiv.innerHTML = DOMPurify.sanitize(rawHtml);
+                                        
+                                        chatBox.scrollTop = chatBox.scrollHeight; // 实时滚动
+
+                                    },50)
+
+                                }
+                            } 
+                            catch (error) {
+                            }
+                        }
+                    }
+                }
+
+              session.messages.push({ role: 'assistant', content: fullText })
+              saveData();
+
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.log('用户手动停止了生成');
+                    const abortedContent = fullText ? fullText + "\n[已中断]" : "[用户主动中断了回答]";
+                    currentAiDiv.innerText = abortedContent;
+                    // ⭐️ 核心：必须推入一条 assistant 消息，保证对话成对！
+                    session.messages.push({ role: 'assistant', content: abortedContent });
+                    saveData(); // ⭐️ 中断后，把脏数据占位符存下来
+
+                } else {
+                    console.error('真正的报错:', error);
+                    currentAiDiv.innerText = "请求发生错误，请重试。";
+                    // 报错时要把刚刚加进去的 user 消息弹出来，防止污染下一次对话
+                    session.messages.pop(); 
+                    saveData(); // ⭐️ 中断后，把脏数据占位符存下来
+                } 
+            } finally {
+                console.log("⚠️ 流程结束，隐藏停止按钮");
+                stopBtn.style.display = 'none';
+                btn.disabled = false;
+                currentController = null;
+            }
+        }
+        
+        stopBtn.addEventListener('click', () => {
+            if (currentController) {
+                currentController.abort(); // ⭐️ 强行中断 fetch 请求
+                currentAiDiv.innerText = fullText + "[已停止生成]";
+            }
+        });
+        
+        btn.addEventListener('click', askAI);
+        newChatBtn.addEventListener('click', createNewSessions);
+         // 自动调整输入框高度
+        inputEl.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+        });
+
+        // 回车发送，Shift+回车换行
+        inputEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault(); // 阻止默认的换行
+                askAI();
+            }
+        });
+
+        // 摘要压缩 非流式请求让大模型自己总结，然后把总结替换掉那部分旧对话。
+        async function compressHistoryIfNeeded() {
+            // 获取当前会话
+            const session = getCurrentSession();
+            if (!session) return;
+            // 假设超过 6 条（3轮对话）就开始压缩最老的 2 条
+            if (session.messages.length > 6) {
+                console.log("⚠️ 历史过长，开始摘要压缩...");
+                
+                // 1. 取出最老的两条对话（假设是一问一答）
+                const oldMessages = session.messages.splice(0, 2); 
+                
+                // 2. 构造总结请求
+                const compressPrompt = [
+                    { role: 'system', content: '你是一个总结助手。请用一段话简要总结以下对话的核心信息。' },
+                    { role: 'user', content: JSON.stringify(oldMessages) }
+                ];
+
+                try {
+                    // 发起非流式请求（注意这里不带 stream: true）
+                    const res = await fetch(API_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            model: MODEL,
+                            messages: compressPrompt,
+                            stream: false 
+                        })
+                    });
+                    const data = await res.json();
+                    const summary = data.choices[0].message.content;
+
+                    // 3. 把摘要作为 system 消息塞到最前面
+                    session.messages.unshift({ role: 'system', content: `以下是之前对话的摘要：${summary}` });
+                    console.log("✅ 摘要压缩完成，当前历史：", session.messages);
+
+                } catch (e) {
+                    console.error("摘要失败，直接丢弃旧消息", e);
+                    // 兜底：如果总结失败，就不管了，直接丢弃旧消息
+                }
+            }
+        }
+        
+        // 处理流式 Markdown 的半截语法问题
+        function formatStreamingMarkdown(text) {
+            // 如果包含 ``` 且数量是奇数，说明代码块没闭合，我们在末尾补一个
+            const codeBlockCount = (text.match(/```/g) || []).length;
+            if (codeBlockCount % 2 !== 0) {
+                return text + '\n```';
+            }
+            return text;
+        }
+
+        function saveData(){
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({
+                sessions,
+                currentSessionId
+            }))
+         
+        }
+
+        // 渲染左侧对话栏
+        function renderSidebar(){
+            sessionListEl.innerHTML = ''
+            const renderSessions = [...sessions].reverse();
+            renderSessions.forEach(session => {
+                const li = document.createElement('li');
+                li.className =  `session-item ${session.id === currentSessionId ? 'active' : ''}`;
+                li.innerText = session.title || '新对话';
+                li.onclick = () => switchSession(session.id);
+                sessionListEl.appendChild(li);
+            })
+        }
+
+        // 渲染右侧聊天界面
+        function renderChat(params) {
+            chatBox.innerHTML='';
+            const session = getCurrentSession();
+            if (!session) return
+            session.messages.forEach(msg => {
+                if (msg.role === 'system') return; // 摘要不显示
+                appendMessageToDOM(msg.role, msg.content);
+            });
+
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // DOM 气泡渲染
+        function appendMessageToDOM(role, text) {
+            const div = document.createElement('div');
+            div.className = `message ${role}`; // 用 class 控制样式了
+            
+            if (role === 'assistant') {
+                const safeText = formatStreamingMarkdown(text);
+                div.innerHTML = DOMPurify.sanitize(marked.parse(safeText));
+            } else {
+                div.innerText = text;
+            }
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+            return div;
+        }
+
+        // 切换会话
+        function switchSession(id) {
+            if (currentSessionId === id) return;
+            if (currentController) currentController.abort(); // ⭐️ 核心防串流：切换时打断上一个请求
+
+            currentSessionId = id;
+            saveData();
+            renderChat();
+        }
+      
+
+        // ⭐️ 页面初始化：从本地读取并渲染历史记录
+        function init() {
+            const saved = localStorage.getItem(STORAGE_KEY);
+            console.log('为啥data.currentSessionId：',saved)
+            if (saved) {
+                try {
+                    const data = JSON.parse(saved);
+                    sessions = data.sessions || [];
+                    currentSessionId = data.currentSessionId || null;
+                   
+                } catch (e) {
+                    console.error("读取本地历史失败", e);
+                }
+            }
+            // 没有数据，且没有新对话，新建一个
+            if(sessions.length === 0 && !getCurrentSession()){
+                createNewSessions();
+            } else {
+                renderChat()
+                renderSidebar()
+            }
+        }
+        // 新建会话
+        function createNewSessions() {
+            // 有请求的流先打断，针对点击新建会话按钮的需求
+            if (currentController) {
+                currentController.abort();
+            }
+            // 没有的话新建id 放到sessions 里面，id ，title赋值，
+            const newId = Date.now().toString();
+            sessions.push({ id: newId, title: '新的对话',  messages: []})
+            currentSessionId = newId
+            saveData()
+            renderChat()
+            inputEl.focus()
+        }
+        // 辅助函数：获取当前活跃的会话对象
+        function getCurrentSession() {
+            return sessions.find(s => s.id === currentSessionId);
+        }
+        // ⭐️ 启动应用
+        init();
+    </script>
+</body>
+</html>
